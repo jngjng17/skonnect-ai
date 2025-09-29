@@ -14,25 +14,29 @@ from sklearn.feature_extraction.text import HashingVectorizer
 faq_model = load_model("chatbot_model.h5")
 event_model = load_model("event_recommender_model.h5")
 
-# Load FAQ tokenizer/encoder
+# FAQ encoders
 with open("tokenizer.pkl", "rb") as f:
     faq_tokenizer = pickle.load(f)
 with open("label_encoder.pkl", "rb") as f:
     faq_label_encoder = pickle.load(f)
 
-# Load Event tokenizer/encoder
+# Event encoders
 with open("event_tokenizer.pkl", "rb") as f:
     event_tokenizer = pickle.load(f)
 with open("event_label_encoder.pkl", "rb") as f:
     event_label_encoder = pickle.load(f)
 
+# ========================
+# Load datasets
+# ========================
 faq_df = pd.read_csv("skonnect_faq_dataset_intents.csv")
+event_df = pd.read_csv("skonnect_event_dataset.csv")
 
 faq_max_len = 20
 event_max_len = 50
 
 # ========================
-# Incremental learning model (hybrid backup)
+# Incremental learning backup
 # ========================
 vectorizer = HashingVectorizer(n_features=2**16)
 clf = SGDClassifier(loss="log_loss")
@@ -43,7 +47,7 @@ if "intent" in faq_df.columns and "patterns" in faq_df.columns:
     clf.partial_fit(X_init, y_init, classes=np.unique(y_init))
 
 # ========================
-# Logging setup
+# Logging
 # ========================
 LOG_FILE = "chat_logs.csv"
 if not os.path.exists(LOG_FILE):
@@ -55,9 +59,7 @@ def log_conversation(user_message, predicted_intent, bot_reply, source="keras"):
                           columns=["timestamp", "user_message", "predicted_intent", "bot_response", "model_source"])
     log_df.to_csv(LOG_FILE, mode="a", header=False, index=False)
 
-# ========================
 # Reload incremental learning from logs
-# ========================
 try:
     log_data = pd.read_csv(LOG_FILE)
     if not log_data.empty:
@@ -74,7 +76,7 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app)
 
-# Templates for FAQ responses
+# Response templates
 templates = [
     "Here’s what I found: {answer}",
     "Good question! {answer}",
@@ -87,8 +89,10 @@ templates = [
 
 last_responses = {}
 
+# ========================
+# Helpers
+# ========================
 def ensure_minimum_words(text, min_words=40):
-    """Pad response to at least min_words."""
     words = text.split()
     if len(words) < min_words:
         filler = (
@@ -100,7 +104,6 @@ def ensure_minimum_words(text, min_words=40):
     return text
 
 def generate_dynamic_reply(base_reply, intent):
-    """Wrap base reply in template and avoid repetition."""
     chosen_template = random.choice(templates)
     reply = chosen_template.format(answer=base_reply)
 
@@ -114,7 +117,6 @@ def generate_dynamic_reply(base_reply, intent):
     return reply
 
 def classify_message(message):
-    """Route to FAQ model or Event model depending on confidence."""
     # FAQ prediction
     faq_seq = faq_tokenizer.texts_to_sequences([message])
     faq_padded = pad_sequences(faq_seq, maxlen=faq_max_len, padding="post")
@@ -129,12 +131,30 @@ def classify_message(message):
     event_conf = float(np.max(event_pred))
     event_intent = event_label_encoder.inverse_transform([np.argmax(event_pred)])[0]
 
-    # Choose model with higher confidence
-    if event_conf > faq_conf:
-        return "event", event_intent, event_conf
-    else:
-        return "faq", faq_intent, faq_conf
+    return ("event", event_intent, event_conf) if event_conf > faq_conf else ("faq", faq_intent, faq_conf)
 
+def recommend_event(predicted_category, top_n=3):
+    matches = event_df[event_df["Recommended Category"].str.lower() == predicted_category.lower()]
+    if matches.empty:
+        return [{"message": f"No events found for category: {predicted_category}"}]
+
+    sampled = matches.sample(min(top_n, len(matches)))
+    recommendations = []
+    for _, row in sampled.iterrows():
+        recommendations.append({
+            "reference_code": row.get("Reference Code", ""),
+            "ppa": row.get("PPAs", ""),
+            "description": row.get("Description", ""),
+            "expected_result": row.get("Expected Result", ""),
+            "period": row.get("Period of Implementation", ""),
+            "responsible": row.get("Person Responsible", ""),
+            "category": row.get("Recommended Category", "")
+        })
+    return recommendations
+
+# ========================
+# Routes
+# ========================
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.json
@@ -143,6 +163,7 @@ def chat():
     model_type, predicted_intent, confidence = classify_message(message)
 
     bot_reply = "I'm not sure how to respond yet."
+    recommendations = []
 
     if model_type == "faq":
         if predicted_intent in faq_df["intent"].values:
@@ -151,7 +172,11 @@ def chat():
                 base_reply = random.choice(responses)
                 bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
     else:
-        bot_reply = f"This looks related to events. Suggested category: {predicted_intent}. Our council is working on activities in this area."
+        recommendations = recommend_event(predicted_intent, top_n=3)
+        if recommendations and "message" not in recommendations[0]:
+            bot_reply = f"I found {len(recommendations)} event(s) for category '{predicted_intent}'. Here are some suggestions!"
+        else:
+            bot_reply = recommendations[0]["message"]
 
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
@@ -159,12 +184,12 @@ def chat():
         "intent": predicted_intent,
         "confidence": confidence,
         "response": bot_reply,
+        "recommendations": recommendations,
         "source": model_type
     })
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
-    """Allow user feedback to update incremental model"""
     data = request.json
     message = data["message"].lower()
     correct_intent = data["correct_intent"]
