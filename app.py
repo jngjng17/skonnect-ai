@@ -278,24 +278,29 @@ def chat():
     data = request.json or {}
     message = (data.get("message") or "").strip()
     message_lc = message.lower()
-    raw_interest = data.get("interest")  # could be "sports, health, environment"
     requested_limit = data.get("limit")
 
-    # ✅ Handle multiple interests separated by commas
+    # ✅ Handle both single "interest" (string) and "interests" (list)
+    raw_interest = data.get("interest")
+    raw_interests = data.get("interests")  # from Flutter as List
+
     categorized_interests = []
-    if raw_interest:
-        interests = [i.strip() for i in raw_interest.split(",") if i.strip()]
-        for intr in interests:
-            cat = categorize_user_interest(intr)
-            if cat and cat not in categorized_interests:
-                categorized_interests.append(cat)
+    if raw_interests and isinstance(raw_interests, list):
+        for intr in raw_interests:
+            if intr:
+                cat = categorize_user_interest(intr)
+                if cat and cat not in categorized_interests:
+                    categorized_interests.append(cat)
+    elif raw_interest:
+        cat = categorize_user_interest(raw_interest)
+        if cat:
+            categorized_interests.append(cat)
 
     model_type, predicted_intent, confidence = classify_message(message_lc)
 
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
 
-    # FAQ handling
     if model_type == "faq":
         if predicted_intent in faq_df["intent"].values:
             responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
@@ -305,16 +310,13 @@ def chat():
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-    # Event handling
     else:  # model_type == "event"
         if categorized_interests:
-            # ✅ gather recs for all categories
             all_recs = []
             for cat in categorized_interests:
                 recs = recommend_event_all(cat, limit=requested_limit)
                 all_recs.extend(recs)
 
-            # deduplicate again after merging
             df_recs = pd.DataFrame(all_recs)
             if not df_recs.empty:
                 df_recs = dedupe_events(df_recs)
@@ -323,22 +325,24 @@ def chat():
             if recommendations:
                 summaries = [r["summary"] for r in recommendations]
                 cats_text = ", ".join(categorized_interests)
-                bot_reply = f"Based on your interests in **{cats_text}**, here are {len(recommendations)} event(s):\n\n" + \
-                            "\n\n".join(summaries)
+                bot_reply = (
+                    f"Based on your interests in **{cats_text}**, "
+                    f"here are {len(recommendations)} event(s):\n\n" +
+                    "\n\n".join(summaries)
+                )
             else:
-                bot_reply = f"Sorry — I couldn't find events for your interests: {', '.join(categorized_interests)}."
-
+                bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
         else:
-            # fallback: use predicted intent category
             recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
             if recommendations:
                 summaries = [r["summary"] for r in recommendations]
-                bot_reply = f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + \
-                           "\n\n".join(summaries)
+                bot_reply = (
+                    f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" +
+                    "\n\n".join(summaries)
+                )
             else:
                 bot_reply = f"No events found for '{predicted_intent}'."
 
-    # log conversation
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
     return jsonify({
@@ -347,7 +351,7 @@ def chat():
         "response": bot_reply,
         "recommendations": recommendations,
         "source": model_type,
-        "categorized_interests": categorized_interests  # now returns list
+        "categorized_interests": categorized_interests,  # ✅ now always list
     })
 
 
