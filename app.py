@@ -278,18 +278,24 @@ def chat():
     data = request.json or {}
     message = (data.get("message") or "").strip()
     message_lc = message.lower()
-    raw_interest = data.get("interest")  # optional: free-text interest from frontend
-    requested_limit = data.get("limit")  # optional: limit number of recs if desired
+    raw_interest = data.get("interest")  # could be "sports, health, environment"
+    requested_limit = data.get("limit")
 
-    # categorize user interest (e.g., 'basketball' -> 'Sports Development')
-    categorized_interest = categorize_user_interest(raw_interest) if raw_interest else None
+    # ✅ Handle multiple interests separated by commas
+    categorized_interests = []
+    if raw_interest:
+        interests = [i.strip() for i in raw_interest.split(",") if i.strip()]
+        for intr in interests:
+            cat = categorize_user_interest(intr)
+            if cat and cat not in categorized_interests:
+                categorized_interests.append(cat)
 
     model_type, predicted_intent, confidence = classify_message(message_lc)
 
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
 
-    # FAQ handling (unchanged)
+    # FAQ handling
     if model_type == "faq":
         if predicted_intent in faq_df["intent"].values:
             responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
@@ -299,47 +305,40 @@ def chat():
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-    # Event handling — smarter, deduped, returns all matches for category
+    # Event handling
     else:  # model_type == "event"
-        # priority 1: if user explicitly provided a categorized interest -> use that category
-        if categorized_interest:
-            recommendations = recommend_event_all(categorized_interest, limit=requested_limit)
+        if categorized_interests:
+            # ✅ gather recs for all categories
+            all_recs = []
+            for cat in categorized_interests:
+                recs = recommend_event_all(cat, limit=requested_limit)
+                all_recs.extend(recs)
+
+            # deduplicate again after merging
+            df_recs = pd.DataFrame(all_recs)
+            if not df_recs.empty:
+                df_recs = dedupe_events(df_recs)
+                recommendations = df_recs.to_dict(orient="records")
+
             if recommendations:
-                bot_reply = f"Based on your interest in **{categorized_interest}**, here are {len(recommendations)} event(s):\n\n" + \
-                           "\n\n".join([r["summary"] for r in recommendations])
+                summaries = [r["summary"] for r in recommendations]
+                cats_text = ", ".join(categorized_interests)
+                bot_reply = f"Based on your interests in **{cats_text}**, here are {len(recommendations)} event(s):\n\n" + \
+                            "\n\n".join(summaries)
             else:
-                bot_reply = f"Sorry — I couldn't find events for your interest '{categorized_interest}'."
+                bot_reply = f"Sorry — I couldn't find events for your interests: {', '.join(categorized_interests)}."
 
-        # priority 2: if message explicitly mentions a category keyword (like 'sports' or 'basketball')
-        elif any(cat_keyword in message_lc for kwlist in category_keywords.values() for cat_keyword in kwlist):
-            # try to map message itself to category
-            mapped = categorize_user_interest(message)
-            if mapped:
-                recommendations = recommend_event_all(mapped, limit=requested_limit)
-                if recommendations:
-                    bot_reply = f"Here are {len(recommendations)} event(s) under **{mapped}**:\n\n" + \
-                               "\n\n".join([r["summary"] for r in recommendations])
-                else:
-                    bot_reply = f"No events found under '{mapped}'."
-            else:
-                # fallback to predicted_intent
-                recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
-                if recommendations:
-                    bot_reply = f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + \
-                               "\n\n".join([r["summary"] for r in recommendations])
-                else:
-                    bot_reply = f"No events found for '{predicted_intent}'."
-
-        # priority 3: use predicted_intent from event model
         else:
+            # fallback: use predicted intent category
             recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
             if recommendations:
+                summaries = [r["summary"] for r in recommendations]
                 bot_reply = f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + \
-                           "\n\n".join([r["summary"] for r in recommendations])
+                           "\n\n".join(summaries)
             else:
                 bot_reply = f"No events found for '{predicted_intent}'."
 
-    # log conversation (keep model_type and predicted_intent for analytics)
+    # log conversation
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
     return jsonify({
@@ -348,8 +347,9 @@ def chat():
         "response": bot_reply,
         "recommendations": recommendations,
         "source": model_type,
-        "categorized_interest": categorized_interest
+        "categorized_interests": categorized_interests  # now returns list
     })
+
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
