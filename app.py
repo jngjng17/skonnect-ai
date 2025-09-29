@@ -309,45 +309,44 @@ def chat():
                 bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
+else:  # model_type == "event"
+    if categorized_interests:
+        all_recs = []
+        for cat in categorized_interests:
+            recs = recommend_event_all(cat)  # fetch all, no limit yet
+            all_recs.extend(recs)
 
-    else:  # model_type == "event"
-       if categorized_interests:
-    all_recs = []
-    for cat in categorized_interests:
-        recs = recommend_event_all(cat)  # fetch all, no limit yet
-        all_recs.extend(recs)
+        # ✅ Deduplicate by Reference Code + fingerprint
+        df_recs = pd.DataFrame(all_recs)
+        if not df_recs.empty:
+            df_recs = dedupe_events(df_recs)
 
-    # ✅ Deduplicate by Reference Code + fingerprint
-    df_recs = pd.DataFrame(all_recs)
-    if not df_recs.empty:
-        df_recs = dedupe_events(df_recs)
+            if requested_limit is not None and len(df_recs) > requested_limit:
+                df_recs = df_recs.head(requested_limit)
 
-        if requested_limit is not None and len(df_recs) > requested_limit:
-            df_recs = df_recs.head(requested_limit)
+            recommendations = df_recs.to_dict(orient="records")
 
-        recommendations = df_recs.to_dict(orient="records")
-
-
-            if recommendations:
-                summaries = [r["summary"] for r in recommendations]
-                cats_text = ", ".join(categorized_interests)
-                bot_reply = (
-                    f"Based on your interests in **{cats_text}**, "
-                    f"here are {len(recommendations)} event(s):\n\n" +
-                    "\n\n".join(summaries)
-                )
-            else:
-                bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
+        if recommendations:
+            summaries = [r["summary"] for r in recommendations]
+            cats_text = ", ".join(categorized_interests)
+            bot_reply = (
+                f"Based on your interests in **{cats_text}**, "
+                f"here are {len(recommendations)} event(s):\n\n" +
+                "\n\n".join(summaries)
+            )
         else:
-            recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
-            if recommendations:
-                summaries = [r["summary"] for r in recommendations]
-                bot_reply = (
-                    f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" +
-                    "\n\n".join(summaries)
-                )
-            else:
-                bot_reply = f"No events found for '{predicted_intent}'."
+            bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
+    else:
+        recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
+        if recommendations:
+            summaries = [r["summary"] for r in recommendations]
+            bot_reply = (
+                f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" +
+                "\n\n".join(summaries)
+            )
+        else:
+            bot_reply = f"No events found for '{predicted_intent}'."
+
 
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
