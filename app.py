@@ -90,6 +90,29 @@ templates = [
 last_responses = {}
 
 # ========================
+# User Event Categorizer
+# ========================
+category_keywords = {
+    "education support": ["education", "school", "scholarship", "study", "tuition"],
+    "environmental protection": ["environment", "tree", "clean up", "recycle", "nature"],
+    "health": ["health", "clinic", "hospital", "medical", "doctor", "checkup"],
+    "sports development": ["sports", "basketball", "volleyball", "football", "athletics"],
+    "capability building": ["training", "seminar", "workshop", "capacity", "skills"],
+    "general administration": ["admin", "office", "barangay", "coordination", "support"],
+    "youth empowerment": ["youth", "leadership", "empowerment", "volunteer"]
+}
+
+def categorize_user_interest(interest):
+    """ Map a user’s interest text into a known category. """
+    if not interest:
+        return None
+    interest = interest.lower()
+    for category, keywords in category_keywords.items():
+        if any(keyword in interest for keyword in keywords):
+            return category.title()
+    return None
+
+# ========================
 # Helpers
 # ========================
 def ensure_minimum_words(text, min_words=40):
@@ -149,7 +172,6 @@ def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
     # ultimate fallback → FAQ
     return "faq", faq_intent, faq_conf
 
-
 def recommend_event(predicted_category, top_n=3):
     matches = event_df[event_df["Recommended Category"].str.lower() == predicted_category.lower()]
     if matches.empty:
@@ -158,6 +180,14 @@ def recommend_event(predicted_category, top_n=3):
     sampled = matches.sample(min(top_n, len(matches)))
     recommendations = []
     for _, row in sampled.iterrows():
+        summary = (
+            f"📌 **{row.get('PPAs', '')}** ({row.get('Recommended Category', '')})\n"
+            f"📝 {row.get('Description', '')}\n"
+            f"🎯 Expected Result: {row.get('Expected Result', '')}\n"
+            f"📅 Implementation: {row.get('Period of Implementation', '')}\n"
+            f"👥 Responsible: {row.get('Person Responsible', '')}\n"
+            f"🔖 Reference: {row.get('Reference Code', '')}"
+        )
         recommendations.append({
             "reference_code": row.get("Reference Code", ""),
             "ppa": row.get("PPAs", ""),
@@ -165,7 +195,8 @@ def recommend_event(predicted_category, top_n=3):
             "expected_result": row.get("Expected Result", ""),
             "period": row.get("Period of Implementation", ""),
             "responsible": row.get("Person Responsible", ""),
-            "category": row.get("Recommended Category", "")
+            "category": row.get("Recommended Category", ""),
+            "summary": summary
         })
     return recommendations
 
@@ -176,7 +207,10 @@ def recommend_event(predicted_category, top_n=3):
 def chat():
     data = request.json
     message = data.get("message", "").lower()
-    user_interest = data.get("interest")
+    raw_interest = data.get("interest")
+
+    # Categorize user interest into SK categories
+    user_interest = categorize_user_interest(raw_interest)
 
     model_type, predicted_intent, confidence = classify_message(message)
 
@@ -194,13 +228,15 @@ def chat():
         if user_interest:
             recommendations = recommend_event(user_interest, top_n=3)
             if recommendations and "message" not in recommendations[0]:
-                bot_reply = f"Based on your interest '{user_interest}', here are some events!"
+                summaries = [rec["summary"] for rec in recommendations]
+                bot_reply = f"Based on your interest in **{user_interest}**, here are some events:\n\n" + "\n\n".join(summaries)
             else:
                 bot_reply = recommendations[0]["message"]
         else:
             recommendations = recommend_event(predicted_intent, top_n=3)
             if recommendations and "message" not in recommendations[0]:
-                bot_reply = f"I found {len(recommendations)} event(s) for category '{predicted_intent}'. Here are some suggestions!"
+                summaries = [rec["summary"] for rec in recommendations]
+                bot_reply = f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + "\n\n".join(summaries)
             else:
                 bot_reply = recommendations[0]["message"]
 
@@ -211,7 +247,8 @@ def chat():
         "confidence": confidence,
         "response": bot_reply,
         "recommendations": recommendations,
-        "source": model_type
+        "source": model_type,
+        "categorized_interest": user_interest
     })
 
 @app.route("/feedback", methods=["POST"])
