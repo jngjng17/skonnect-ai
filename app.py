@@ -1,13 +1,12 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import pickle, os, datetime, random
+import pickle, os, datetime, random, re
 import pandas as pd
 import numpy as np
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from sklearn.linear_model import SGDClassifier
 from sklearn.feature_extraction.text import HashingVectorizer
-import re
 
 # ========================
 # Load TensorFlow models & preprocessors
@@ -31,9 +30,9 @@ with open("event_label_encoder.pkl", "rb") as f:
 # Load datasets
 # ========================
 faq_df = pd.read_csv("skonnect_faq_dataset_intents.csv")
-event_df = pd.read_csv("Events.csv").fillna("")  # avoid NaNs
+event_df = pd.read_csv("Events.csv").fillna("")
 
-# Normalize event_df string columns for matching
+# Normalize event_df string columns
 for col in ["Recommended Category", "PPAs", "Description", "Reference Code"]:
     if col in event_df.columns:
         event_df[col] = event_df[col].astype(str)
@@ -53,7 +52,6 @@ if "intent" in faq_df.columns and "patterns" in faq_df.columns:
     try:
         clf.partial_fit(X_init, y_init, classes=np.unique(y_init))
     except Exception:
-        # if partial_fit fails due to classes mismatch on first run, ignore
         pass
 
 # ========================
@@ -69,7 +67,6 @@ def log_conversation(user_message, predicted_intent, bot_reply, source="keras"):
                           columns=["timestamp", "user_message", "predicted_intent", "bot_response", "model_source"])
     log_df.to_csv(LOG_FILE, mode="a", header=False, index=False)
 
-# Reload incremental learning from logs
 try:
     log_data = pd.read_csv(LOG_FILE)
     if not log_data.empty:
@@ -86,7 +83,6 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app)
 
-# Response templates
 templates = [
     "Here’s what I found: {answer}",
     "Good question! {answer}",
@@ -100,12 +96,12 @@ templates = [
 last_responses = {}
 
 # ========================
-# User Event Categorizer (keyword -> category)
+# User Event Categorizer
 # ========================
 category_keywords = {
     "Education Support": ["education", "school", "scholarship", "study", "tuition", "exam", "learning"],
     "Environmental Protection": ["environment", "tree", "clean up", "recycle", "nature", "river", "eco"],
-    "Health": ["health", "clinic", "hospital", "medical", "doctor", "checkup", "vaccine", "clinic"],
+    "Health": ["health", "clinic", "hospital", "medical", "doctor", "checkup", "vaccine"],
     "Sports Development": ["sports", "basketball", "volleyball", "football", "athletics", "soccer", "games"],
     "Capability Building": ["training", "seminar", "workshop", "capacity", "skills", "orientation"],
     "General Administration": ["admin", "office", "barangay", "coordination", "support", "meeting"],
@@ -113,16 +109,13 @@ category_keywords = {
 }
 
 def categorize_user_interest(interest_text):
-    """Map a raw interest string to one of the categories (title-cased)."""
     if not interest_text:
         return None
     interest = interest_text.lower()
-    # exact phrase matching first
     for category, keywords in category_keywords.items():
         for kw in keywords:
             if re.search(r'\b' + re.escape(kw) + r'\b', interest):
                 return category
-    # fallback: check substrings
     for category, keywords in category_keywords.items():
         if any(kw in interest for kw in keywords):
             return category
@@ -139,87 +132,56 @@ def ensure_minimum_words(text, min_words=40):
             "and projects to benefit the youth and community. We encourage participation "
             "and feedback so everyone in Brgy. Buhangin benefits from our initiatives."
         )
-        text = text + filler
+        text += filler
     return text
 
 def generate_dynamic_reply(base_reply, intent):
     chosen_template = random.choice(templates)
     reply = chosen_template.format(answer=base_reply)
-
     if intent in last_responses and last_responses[intent] == reply:
         alt_templates = [t for t in templates if t.format(answer=base_reply) != reply]
         if alt_templates:
             reply = random.choice(alt_templates).format(answer=base_reply)
-
     reply = ensure_minimum_words(reply, 40)
     last_responses[intent] = reply
     return reply
 
 def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
-    # FAQ prediction
     faq_seq = faq_tokenizer.texts_to_sequences([message])
     faq_padded = pad_sequences(faq_seq, maxlen=faq_max_len, padding="post")
     faq_pred = faq_model.predict(faq_padded)
     faq_conf = float(np.max(faq_pred))
     faq_intent = faq_label_encoder.inverse_transform([np.argmax(faq_pred)])[0]
 
-    # Event prediction
     event_seq = event_tokenizer.texts_to_sequences([message])
     event_padded = pad_sequences(event_seq, maxlen=event_max_len, padding="post")
     event_pred = event_model.predict(event_padded)
     event_conf = float(np.max(event_pred))
     event_intent = event_label_encoder.inverse_transform([np.argmax(event_pred)])[0]
 
-    # explicit mention of the word event -> favor event (if confident)
     if "event" in message.lower():
-        if event_conf >= event_threshold:
-            return "event", event_intent, event_conf
-        else:
-            return "faq", faq_intent, faq_conf
-
-    # otherwise prioritize FAQ if it's reasonably confident
+        return ("event", event_intent, event_conf) if event_conf >= event_threshold else ("faq", faq_intent, faq_conf)
     if faq_conf >= faq_threshold:
         return "faq", faq_intent, faq_conf
-
-    # fallback to event if FAQ is weak and event confident
     if event_conf >= event_threshold:
         return "event", event_intent, event_conf
-
-    # ultimate fallback -> FAQ
     return "faq", faq_intent, faq_conf
 
-# ========================
-# Event recommendation: dedupe + return all matches
-# ========================
 def clean_string(s):
-    if s is None:
-        return ""
-    return re.sub(r'\s+', ' ', str(s)).strip()
+    return re.sub(r'\s+', ' ', str(s or "")).strip()
 
 def dedupe_events(df):
-    """Remove duplicate events by Reference Code first, then by (PPA + Description) fingerprint."""
     if df.empty:
         return df
-    # remove duplicates by reference code if present
     if "Reference Code" in df.columns:
         df = df.drop_duplicates(subset=["Reference Code"])
-    # fingerprint to avoid near-duplicate rows
     if {"PPAs", "Description"}.issubset(df.columns):
-        df["fingerprint"] = (df["PPAs"].astype(str).str.lower().str.strip() + "||" + df["Description"].astype(str).str.lower().str.strip())
+        df["fingerprint"] = (
+            df["PPAs"].astype(str).str.lower().str.strip() + "||" +
+            df["Description"].astype(str).str.lower().str.strip()
+        )
         df = df.drop_duplicates(subset=["fingerprint"])
         df = df.drop(columns=["fingerprint"])
-    return df
-
-def sort_events(df):
-    """Attempt to sort by Period of Implementation if present (simple alphanumeric)."""
-    if "Period of Implementation" in df.columns:
-        # keep as-is if empty or not sortable; otherwise sort ignoring empty strings
-        try:
-            df["__period_sort"] = df["Period of Implementation"].astype(str)
-            df = df.sort_values(by="__period_sort", ascending=True)
-            df = df.drop(columns=["__period_sort"])
-        except Exception:
-            pass
     return df
 
 def make_summary_from_row(row):
@@ -233,27 +195,16 @@ def make_summary_from_row(row):
     )
 
 def recommend_event_all(category, limit=None):
-    """Return all non-duplicate events matching the category (case-insensitive).
-       If limit is provided, truncate to that many; otherwise return all."""
     if not category:
         return []
     cat_lower = category.strip().lower()
-    # match rows where Recommended Category equals category (case-insensitive)
-    if "Recommended Category" in event_df.columns:
-        mask = event_df["Recommended Category"].astype(str).str.lower().str.strip() == cat_lower
-        matches = event_df[mask].copy()
-    else:
-        matches = event_df[event_df.apply(lambda r: False, axis=1)].copy()
-
+    mask = event_df["Recommended Category"].astype(str).str.lower().str.strip() == cat_lower
+    matches = event_df[mask].copy()
     if matches.empty:
         return []
-
     matches = dedupe_events(matches)
-    matches = sort_events(matches)
-
     if limit is not None and len(matches) > limit:
         matches = matches.head(limit)
-
     recommendations = []
     for _, row in matches.iterrows():
         rec = {
@@ -264,10 +215,9 @@ def recommend_event_all(category, limit=None):
             "period": clean_string(row.get("Period of Implementation", "")),
             "responsible": clean_string(row.get("Person Responsible", "")),
             "category": clean_string(row.get("Recommended Category", "")),
+            "summary": make_summary_from_row(row),
         }
-        rec["summary"] = make_summary_from_row(row)
         recommendations.append(rec)
-
     return recommendations
 
 # ========================
@@ -277,12 +227,10 @@ def recommend_event_all(category, limit=None):
 def chat():
     data = request.json or {}
     message = (data.get("message") or "").strip()
-    message_lc = message.lower()
     requested_limit = data.get("limit")
 
-    # ✅ Handle both single "interest" (string) and "interests" (list)
     raw_interest = data.get("interest")
-    raw_interests = data.get("interests")  # from Flutter as List
+    raw_interests = data.get("interests")
 
     categorized_interests = []
     if raw_interests and isinstance(raw_interests, list):
@@ -296,7 +244,7 @@ def chat():
         if cat:
             categorized_interests.append(cat)
 
-    model_type, predicted_intent, confidence = classify_message(message_lc)
+    model_type, predicted_intent, confidence = classify_message(message.lower())
 
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
@@ -307,46 +255,40 @@ def chat():
             if responses:
                 base_reply = random.choice(responses)
                 bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
+            else:
+                bot_reply = "Sorry, I couldn't find an FAQ answer for that."
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
-else:  # model_type == "event"
-    if categorized_interests:
-        all_recs = []
-        for cat in categorized_interests:
-            recs = recommend_event_all(cat)  # fetch all, no limit yet
-            all_recs.extend(recs)
 
-        # ✅ Deduplicate by Reference Code + fingerprint
-        df_recs = pd.DataFrame(all_recs)
-        if not df_recs.empty:
-            df_recs = dedupe_events(df_recs)
-
-            if requested_limit is not None and len(df_recs) > requested_limit:
-                df_recs = df_recs.head(requested_limit)
-
-            recommendations = df_recs.to_dict(orient="records")
-
-        if recommendations:
-            summaries = [r["summary"] for r in recommendations]
-            cats_text = ", ".join(categorized_interests)
-            bot_reply = (
-                f"Based on your interests in **{cats_text}**, "
-                f"here are {len(recommendations)} event(s):\n\n" +
-                "\n\n".join(summaries)
-            )
+    else:  # event handling
+        if categorized_interests:
+            all_recs = []
+            for cat in categorized_interests:
+                all_recs.extend(recommend_event_all(cat))
+            df_recs = pd.DataFrame(all_recs)
+            if not df_recs.empty:
+                df_recs = dedupe_events(df_recs)
+                if requested_limit and len(df_recs) > requested_limit:
+                    df_recs = df_recs.head(requested_limit)
+                recommendations = df_recs.to_dict(orient="records")
+            if recommendations:
+                summaries = [r["summary"] for r in recommendations]
+                cats_text = ", ".join(categorized_interests)
+                bot_reply = (
+                    f"Based on your interests in **{cats_text}**, "
+                    f"here are {len(recommendations)} event(s):\n\n" + "\n\n".join(summaries)
+                )
+            else:
+                bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
         else:
-            bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
-    else:
-        recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
-        if recommendations:
-            summaries = [r["summary"] for r in recommendations]
-            bot_reply = (
-                f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" +
-                "\n\n".join(summaries)
-            )
-        else:
-            bot_reply = f"No events found for '{predicted_intent}'."
-
+            recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
+            if recommendations:
+                summaries = [r["summary"] for r in recommendations]
+                bot_reply = (
+                    f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + "\n\n".join(summaries)
+                )
+            else:
+                bot_reply = f"No events found for '{predicted_intent}'."
 
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
@@ -356,23 +298,20 @@ else:  # model_type == "event"
         "response": bot_reply,
         "recommendations": recommendations,
         "source": model_type,
-        "categorized_interests": categorized_interests,  # ✅ now always list
+        "categorized_interests": categorized_interests,
     })
-
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
     data = request.json or {}
     message = (data.get("message") or "").lower()
     correct_intent = data.get("correct_intent")
-
     if message and correct_intent:
         X_new = vectorizer.transform([message])
         try:
             clf.partial_fit(X_new, [correct_intent])
         except Exception:
             pass
-
         log_conversation(message, correct_intent, "Corrected by user", source="feedback")
         return jsonify({"status": "updated", "new_intent": correct_intent})
     return jsonify({"status": "failed", "reason": "missing message or correct_intent"}), 400
