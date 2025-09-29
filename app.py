@@ -116,7 +116,7 @@ def generate_dynamic_reply(base_reply, intent):
     last_responses[intent] = reply
     return reply
 
-def classify_message(message, event_threshold=0.70, faq_threshold=0.50):
+def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
     # FAQ prediction
     faq_seq = faq_tokenizer.texts_to_sequences([message])
     faq_padded = pad_sequences(faq_seq, maxlen=faq_max_len, padding="post")
@@ -131,14 +131,23 @@ def classify_message(message, event_threshold=0.70, faq_threshold=0.50):
     event_conf = float(np.max(event_pred))
     event_intent = event_label_encoder.inverse_transform([np.argmax(event_pred)])[0]
 
-    # ✅ Decision logic
-    if faq_conf >= faq_threshold and faq_conf >= event_conf:
+    # ✅ Explicit keyword check (if user mentions "event")
+    if "event" in message.lower():
+        if event_conf >= event_threshold:
+            return "event", event_intent, event_conf
+        else:
+            return "faq", faq_intent, faq_conf
+
+    # ✅ Priority: FAQ first
+    if faq_conf >= faq_threshold:
         return "faq", faq_intent, faq_conf
-    elif event_conf >= event_threshold:
+
+    # fallback to event if FAQ too weak but event strong
+    if event_conf >= event_threshold:
         return "event", event_intent, event_conf
-    else:
-        # fallback to FAQ if neither is confident enough
-        return "faq", faq_intent, faq_conf
+
+    # ultimate fallback → FAQ
+    return "faq", faq_intent, faq_conf
 
 
 def recommend_event(predicted_category, top_n=3):
@@ -167,7 +176,7 @@ def recommend_event(predicted_category, top_n=3):
 def chat():
     data = request.json
     message = data.get("message", "").lower()
-    user_interest = data.get("interest")  # ✅ frontend can pass interest only for event queries
+    user_interest = data.get("interest")
 
     model_type, predicted_intent, confidence = classify_message(message)
 
@@ -181,12 +190,13 @@ def chat():
                 base_reply = random.choice(responses)
                 bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
 
-    else:  # event type
-        if user_interest:  # ✅ refine by user interest if provided
-            matches = event_df[event_df["Recommended Category"].str.lower() == user_interest.lower()]
-            if not matches.empty:
-                recommendations = recommend_event(user_interest, top_n=3)
+    elif model_type == "event":
+        if user_interest:
+            recommendations = recommend_event(user_interest, top_n=3)
+            if recommendations and "message" not in recommendations[0]:
                 bot_reply = f"Based on your interest '{user_interest}', here are some events!"
+            else:
+                bot_reply = recommendations[0]["message"]
         else:
             recommendations = recommend_event(predicted_intent, top_n=3)
             if recommendations and "message" not in recommendations[0]:
