@@ -30,7 +30,7 @@ with open("event_label_encoder.pkl", "rb") as f:
 # Load datasets
 # ========================
 faq_df = pd.read_csv("skonnect_faq_dataset_intents.csv")
-event_df = pd.read_csv("skonnect_event_dataset.csv")
+event_df = pd.read_csv("Events.csv")
 
 faq_max_len = 20
 event_max_len = 50
