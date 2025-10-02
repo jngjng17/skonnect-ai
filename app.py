@@ -294,11 +294,25 @@ def chat():
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
     elif model_type == "unknown":
-        bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
-        recommendations = recommend_event_all("General Administration", limit=requested_limit)
-        if recommendations:
-            summaries = [r["summary"] for r in recommendations]
-            bot_reply += "\n\nHere are some **General Events** instead:\n\n" + "\n\n".join(summaries)
+    bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
+
+    # Recommend general events
+    recommendations = recommend_event_all("General Administration", limit=requested_limit)
+    if recommendations:
+        summaries = [r["summary"] for r in recommendations]
+        bot_reply += "\n\nHere are some **General Events** instead:\n\n" + "\n\n".join(summaries)
+
+    # Also suggest some sample FAQs
+    if not faq_df.empty and "patterns" in faq_df.columns and "bot_response" in faq_df.columns:
+        sample_faqs = faq_df.sample(min(3, len(faq_df)))  # pick up to 3 random FAQs
+        faq_texts = []
+        for _, row in sample_faqs.iterrows():
+            q = clean_string(row.get("patterns", ""))
+            a = clean_string(row.get("bot_response", ""))
+            faq_texts.append(f"❓ {q}\n💡 {a}")
+        if faq_texts:
+            bot_reply += "\n\nHere are some **sample FAQs** you can ask:\n\n" + "\n\n".join(faq_texts)
+
 
     elif model_type == "event":
         if categorized_interests:
