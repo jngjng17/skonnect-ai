@@ -146,6 +146,13 @@ def generate_dynamic_reply(base_reply, intent):
     last_responses[intent] = reply
     return reply
 
+def is_gibberish(text):
+    if len(text) < 2:
+        return True
+    if re.match(r'^[^a-zA-Z0-9]+$', text):  # only symbols
+        return True
+    return False
+
 def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
     faq_seq = faq_tokenizer.texts_to_sequences([message])
     faq_padded = pad_sequences(faq_seq, maxlen=faq_max_len, padding="post")
@@ -159,13 +166,16 @@ def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
     event_conf = float(np.max(event_pred))
     event_intent = event_label_encoder.inverse_transform([np.argmax(event_pred)])[0]
 
+    if faq_conf < faq_threshold and event_conf < event_threshold:
+        return "unknown", "unknown", 0.0
+
     if "event" in message.lower():
         return ("event", event_intent, event_conf) if event_conf >= event_threshold else ("faq", faq_intent, faq_conf)
     if faq_conf >= faq_threshold:
         return "faq", faq_intent, faq_conf
     if event_conf >= event_threshold:
         return "event", event_intent, event_conf
-    return "faq", faq_intent, faq_conf
+    return "unknown", "unknown", 0.0
 
 def clean_string(s):
     return re.sub(r'\s+', ' ', str(s or "")).strip()
@@ -229,6 +239,19 @@ def chat():
     message = (data.get("message") or "").strip()
     requested_limit = data.get("limit")
 
+    # Gibberish or empty input handling
+    if not message or is_gibberish(message):
+        bot_reply = "Sorry, I didn’t quite understand that 🤔. Could you rephrase?"
+        log_conversation(message, "unknown", bot_reply, "fallback")
+        return jsonify({
+            "intent": "unknown",
+            "confidence": 0.0,
+            "response": bot_reply,
+            "recommendations": [],
+            "source": "fallback",
+            "categorized_interests": []
+        })
+
     raw_interest = data.get("interest")
     raw_interests = data.get("interests")
 
@@ -260,7 +283,7 @@ def chat():
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-    else:  # event handling
+    elif model_type == "event":
         if categorized_interests:
             all_recs = []
             for cat in categorized_interests:
@@ -281,14 +304,20 @@ def chat():
             else:
                 bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
         else:
-            recommendations = recommend_event_all(predicted_intent, limit=requested_limit)
+            # Default to General Events if no specific interest
+            recommendations = recommend_event_all("General Administration", limit=requested_limit)
             if recommendations:
                 summaries = [r["summary"] for r in recommendations]
                 bot_reply = (
-                    f"I found {len(recommendations)} event(s) under '{predicted_intent}':\n\n" + "\n\n".join(summaries)
+                    f"Since no specific interest was mentioned, here are some **General Events**:\n\n"
+                    + "\n\n".join(summaries)
                 )
             else:
-                bot_reply = f"No events found for '{predicted_intent}'."
+                bot_reply = "Currently, there are no General events available."
+
+    else:  # unknown intent
+        bot_reply = "I’m not sure what you mean 🤔, but you can ask me about FAQs or available events."
+        recommendations = recommend_event_all("General Administration", limit=requested_limit)
 
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
