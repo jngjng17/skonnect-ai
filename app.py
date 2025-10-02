@@ -282,6 +282,7 @@ def chat():
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
 
+    # === FAQ HANDLING ===
     if model_type == "faq":
         if predicted_intent in faq_df["intent"].values:
             responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
@@ -293,7 +294,8 @@ def chat():
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-       elif model_type == "unknown":
+    # === UNKNOWN HANDLING ===
+    elif model_type == "unknown":
         bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
 
         # Recommend general events
@@ -313,8 +315,7 @@ def chat():
             if faq_texts:
                 bot_reply += "\n\nHere are some **sample FAQs** you can ask:\n\n" + "\n\n".join(faq_texts)
 
-
-
+    # === EVENT HANDLING ===
     elif model_type == "event":
         if categorized_interests:
             all_recs = []
@@ -347,6 +348,7 @@ def chat():
             else:
                 bot_reply = "Currently, there are no General events available."
 
+    # Log the conversation
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
     return jsonify({
@@ -357,6 +359,7 @@ def chat():
         "source": model_type,
         "categorized_interests": categorized_interests,
     })
+
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
