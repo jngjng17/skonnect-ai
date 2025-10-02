@@ -154,28 +154,38 @@ def is_gibberish(text):
     return False
 
 def classify_message(message, event_threshold=0.70, faq_threshold=0.40):
+    # Run FAQ prediction
     faq_seq = faq_tokenizer.texts_to_sequences([message])
     faq_padded = pad_sequences(faq_seq, maxlen=faq_max_len, padding="post")
     faq_pred = faq_model.predict(faq_padded)
     faq_conf = float(np.max(faq_pred))
     faq_intent = faq_label_encoder.inverse_transform([np.argmax(faq_pred)])[0]
 
+    # Run Event prediction
     event_seq = event_tokenizer.texts_to_sequences([message])
     event_padded = pad_sequences(event_seq, maxlen=event_max_len, padding="post")
     event_pred = event_model.predict(event_padded)
     event_conf = float(np.max(event_pred))
     event_intent = event_label_encoder.inverse_transform([np.argmax(event_pred)])[0]
 
+    # If both confidences are too low → unknown
     if faq_conf < faq_threshold and event_conf < event_threshold:
         return "unknown", "unknown", 0.0
 
+    # If explicitly asking about events
     if "event" in message.lower():
-        return ("event", event_intent, event_conf) if event_conf >= event_threshold else ("faq", faq_intent, faq_conf)
-    if faq_conf >= faq_threshold:
+        if event_conf >= event_threshold:
+            return "event", event_intent, event_conf
+        return "unknown", "unknown", 0.0
+
+    # Otherwise pick the stronger one
+    if faq_conf >= faq_threshold and faq_conf >= event_conf:
         return "faq", faq_intent, faq_conf
-    if event_conf >= event_threshold:
+    if event_conf >= event_threshold and event_conf > faq_conf:
         return "event", event_intent, event_conf
+
     return "unknown", "unknown", 0.0
+
 
 def clean_string(s):
     return re.sub(r'\s+', ' ', str(s or "")).strip()
@@ -272,48 +282,55 @@ def chat():
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
 
-    if model_type == "faq":
-        if predicted_intent in faq_df["intent"].values:
-            responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
-            if responses:
-                base_reply = random.choice(responses)
-                bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
-            else:
-                bot_reply = "Sorry, I couldn't find an FAQ answer for that."
+   if model_type == "faq":
+    if predicted_intent in faq_df["intent"].values:
+        responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
+        if responses:
+            base_reply = random.choice(responses)
+            bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
+    else:
+        bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-    elif model_type == "event":
-        if categorized_interests:
-            all_recs = []
-            for cat in categorized_interests:
-                all_recs.extend(recommend_event_all(cat))
-            df_recs = pd.DataFrame(all_recs)
-            if not df_recs.empty:
-                df_recs = dedupe_events(df_recs)
-                if requested_limit and len(df_recs) > requested_limit:
-                    df_recs = df_recs.head(requested_limit)
-                recommendations = df_recs.to_dict(orient="records")
-            if recommendations:
-                summaries = [r["summary"] for r in recommendations]
-                cats_text = ", ".join(categorized_interests)
-                bot_reply = (
-                    f"Based on your interests in **{cats_text}**, "
-                    f"here are {len(recommendations)} event(s):\n\n" + "\n\n".join(summaries)
-                )
-            else:
-                bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
+elif model_type == "unknown":
+    bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
+    recommendations = recommend_event_all("General Administration", limit=requested_limit)
+    if recommendations:
+        summaries = [r["summary"] for r in recommendations]
+        bot_reply += "\n\nHere are some **General Events** instead:\n\n" + "\n\n".join(summaries)
+
+elif model_type == "event":
+    if categorized_interests:
+        all_recs = []
+        for cat in categorized_interests:
+            all_recs.extend(recommend_event_all(cat))
+        df_recs = pd.DataFrame(all_recs)
+        if not df_recs.empty:
+            df_recs = dedupe_events(df_recs)
+            if requested_limit and len(df_recs) > requested_limit:
+                df_recs = df_recs.head(requested_limit)
+            recommendations = df_recs.to_dict(orient="records")
+        if recommendations:
+            summaries = [r["summary"] for r in recommendations]
+            cats_text = ", ".join(categorized_interests)
+            bot_reply = (
+                f"Based on your interests in **{cats_text}**, "
+                f"here are {len(recommendations)} event(s):\n\n" + "\n\n".join(summaries)
+            )
         else:
-            # Default to General Events if no specific interest
-            recommendations = recommend_event_all("General Administration", limit=requested_limit)
-            if recommendations:
-                summaries = [r["summary"] for r in recommendations]
-                bot_reply = (
-                    f"Since no specific interest was mentioned, here are some **General Events**:\n\n"
-                    + "\n\n".join(summaries)
-                )
-            else:
-                bot_reply = "Currently, there are no General events available."
+            bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
+    else:
+        # Default to General Events if no specific interest
+        recommendations = recommend_event_all("General Administration", limit=requested_limit)
+        if recommendations:
+            summaries = [r["summary"] for r in recommendations]
+            bot_reply = (
+                f"Since no specific interest was mentioned, here are some **General Events**:\n\n"
+                + "\n\n".join(summaries)
+            )
+        else:
+            bot_reply = "Currently, there are no General events available."
 
     else:  # unknown intent
         bot_reply = "I’m not sure what you mean 🤔, but you can ask me about FAQs or available events."
