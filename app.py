@@ -282,59 +282,55 @@ def chat():
     bot_reply = "I'm not sure how to respond yet."
     recommendations = []
 
-   if model_type == "faq":
-    if predicted_intent in faq_df["intent"].values:
-        responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
-        if responses:
-            base_reply = random.choice(responses)
-            bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
+    if model_type == "faq":
+        if predicted_intent in faq_df["intent"].values:
+            responses = faq_df[faq_df["intent"] == predicted_intent]["bot_response"].tolist()
+            if responses:
+                base_reply = random.choice(responses)
+                bot_reply = generate_dynamic_reply(base_reply, predicted_intent)
+            else:
+                bot_reply = "Sorry, I couldn't find an FAQ answer for that."
         else:
             bot_reply = "Sorry, I couldn't find an FAQ answer for that."
-    else:
-        bot_reply = "Sorry, I couldn't find an FAQ answer for that."
 
-elif model_type == "unknown":
-    bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
-    recommendations = recommend_event_all("General Administration", limit=requested_limit)
-    if recommendations:
-        summaries = [r["summary"] for r in recommendations]
-        bot_reply += "\n\nHere are some **General Events** instead:\n\n" + "\n\n".join(summaries)
-
-elif model_type == "event":
-    if categorized_interests:
-        all_recs = []
-        for cat in categorized_interests:
-            all_recs.extend(recommend_event_all(cat))
-        df_recs = pd.DataFrame(all_recs)
-        if not df_recs.empty:
-            df_recs = dedupe_events(df_recs)
-            if requested_limit and len(df_recs) > requested_limit:
-                df_recs = df_recs.head(requested_limit)
-            recommendations = df_recs.to_dict(orient="records")
-        if recommendations:
-            summaries = [r["summary"] for r in recommendations]
-            cats_text = ", ".join(categorized_interests)
-            bot_reply = (
-                f"Based on your interests in **{cats_text}**, "
-                f"here are {len(recommendations)} event(s):\n\n" + "\n\n".join(summaries)
-            )
-        else:
-            bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
-    else:
-        # Default to General Events if no specific interest
+    elif model_type == "unknown":
+        bot_reply = "Sorry, I didn’t quite understand that 🤔. You can ask me about events or FAQs."
         recommendations = recommend_event_all("General Administration", limit=requested_limit)
         if recommendations:
             summaries = [r["summary"] for r in recommendations]
-            bot_reply = (
-                f"Since no specific interest was mentioned, here are some **General Events**:\n\n"
-                + "\n\n".join(summaries)
-            )
-        else:
-            bot_reply = "Currently, there are no General events available."
+            bot_reply += "\n\nHere are some **General Events** instead:\n\n" + "\n\n".join(summaries)
 
-    else:  # unknown intent
-        bot_reply = "I’m not sure what you mean 🤔, but you can ask me about FAQs or available events."
-        recommendations = recommend_event_all("General Administration", limit=requested_limit)
+    elif model_type == "event":
+        if categorized_interests:
+            all_recs = []
+            for cat in categorized_interests:
+                all_recs.extend(recommend_event_all(cat))
+            df_recs = pd.DataFrame(all_recs)
+            if not df_recs.empty:
+                df_recs = dedupe_events(df_recs)
+                if requested_limit and len(df_recs) > requested_limit:
+                    df_recs = df_recs.head(requested_limit)
+                recommendations = df_recs.to_dict(orient="records")
+            if recommendations:
+                summaries = [r["summary"] for r in recommendations]
+                cats_text = ", ".join(categorized_interests)
+                bot_reply = (
+                    f"Based on your interests in **{cats_text}**, "
+                    f"here are {len(recommendations)} event(s):\n\n" + "\n\n".join(summaries)
+                )
+            else:
+                bot_reply = f"Sorry — I couldn't find events for: {', '.join(categorized_interests)}."
+        else:
+            # Default to General Events if no specific interest
+            recommendations = recommend_event_all("General Administration", limit=requested_limit)
+            if recommendations:
+                summaries = [r["summary"] for r in recommendations]
+                bot_reply = (
+                    f"Since no specific interest was mentioned, here are some **General Events**:\n\n"
+                    + "\n\n".join(summaries)
+                )
+            else:
+                bot_reply = "Currently, there are no General events available."
 
     log_conversation(message, predicted_intent, bot_reply, model_type)
 
